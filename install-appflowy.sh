@@ -1,94 +1,62 @@
 #!/bin/bash
-# AppFlowy Web install + Nginx reverse-proxy at /appflowy on Ubuntu 25.04
-# Server IP: 10.70.5.185
+# AppFlowy Cloud install + Nginx reverse-proxy at /appflowy on Ubuntu 25.04
+# Server IP for final message:
+SERVER_IP="10.70.5.185"
 
 set -euo pipefail
 
-SERVER_IP="10.70.5.185"
-APP_DIR="/srv/appflowy"
-COMPOSE_FILE="$APP_DIR/compose.yml"
+APP_DIR="/srv/AppFlowy-Cloud"
 NGINX_VHOST="/etc/nginx/conf.d/snipeit.conf"
-LOCATION_MARK="# >>> APPFLOWY /appflowy REVERSE PROXY >>>"
+MARK_BEGIN="# >>> APPFLOWY /appflowy REVERSE PROXY >>>"
+MARK_END="# <<< APPFLOWY /appflowy REVERSE PROXY <<<"
 
-# 1) Install Docker Engine + Compose plugin from official repo
-sudo apt update
-sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-sudo systemctl enable --now docker
+as_root() { sudo -H bash -c "$*"; }
 
-# 2) Create AppFlowy directory + compose file
-sudo mkdir -p "$APP_DIR/data"
-sudo chown -R "$USER":"$USER" "$APP_DIR"
+echo "==> Installing Docker Engine + Compose v2 from Docker's official repo"
+as_root 'apt remove -y docker.io docker-doc docker-compose podman-docker containerd runc 2>/dev/null || true'
+as_root 'apt update && apt install -y ca-certificates curl gnupg lsb-release'
+as_root 'install -m 0755 -d /etc/apt/keyrings'
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | as_root 'gpg --dearmor -o /etc/apt/keyrings/docker.gpg'
+as_root 'chmod a+r /etc/apt/keyrings/docker.gpg'
+UBU_CODENAME="$(lsb_release -cs)"
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu ${UBU_CODENAME} stable" \
+| as_root 'tee /etc/apt/sources.list.d/docker.list >/dev/null'
+as_root 'apt update'
+as_root 'apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin'
+as_root 'systemctl enable --now docker'
 
-cat > "$COMPOSE_FILE" <<'YAML'
-services:
-  appflowy:
-    image: appflowyio/appflowy:latest
-    container_name: appflowy
-    restart: unless-stopped
-    environment:
-      - APPFLOWY_MODE=web
-      - RUST_BACKTRACE=1
-    ports:
-      - "8080:8080"
-    volumes:
-      - ./data:/app/data
-YAML
-
-# 3) Start AppFlowy
-sudo docker compose -f "$COMPOSE_FILE" up -d
-
-# 4) Add Nginx reverse proxy at /appflowy/
-if [ ! -f "$NGINX_VHOST" ]; then
-  echo "ERROR: $NGINX_VHOST not found. Make sure your Snipe-IT vhost exists."
-  exit 1
-fi
-
-# If block already present, skip insert
-if grep -q "$LOCATION_MARK" "$NGINX_VHOST"; then
-  echo "Nginx reverse-proxy block already present. Skipping edit."
+# Allow current user to run docker without sudo (will take effect in this shell via newgrp)
+as_root 'groupadd docker 2>/dev/null || true'
+as_root "usermod -aG docker $USER"
+if newgrp docker <<<'echo' >/dev/null 2>&1; then
+  DOCKER="docker"
 else
-  sudo cp "$NGINX_VHOST" "${NGINX_VHOST}.bak.$(date +%s)"
-  # Insert our location block just before the closing '}' of the first server block
-  sudo awk -v mark="$LOCATION_MARK" '
-    BEGIN {inserted=0; depth=0}
-    {
-      # track braces to find end of first server block
-      if ($0 ~ /server[[:space:]]*\{/ && depth==0) { depth=1 }
-      if (depth==1 && $0 ~ /^\}/ && inserted==0) {
-        print "    " mark
-        print "    location /appflowy/ {"
-        print "        proxy_pass http://127.0.0.1:8080/;"
-        print "        proxy_http_version 1.1;"
-        print "        proxy_set_header Upgrade $http_upgrade;"
-        print "        proxy_set_header Connection \"upgrade\";"
-        print "        proxy_set_header Host $host;"
-        print "        proxy_set_header X-Real-IP $remote_addr;"
-        print "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;"
-        print "        proxy_set_header X-Forwarded-Proto $scheme;"
-        print "    }"
-        print "    " mark " END"
-        inserted=1
-      }
-      print
-      if (depth>0 && $0 ~ /^\}/) { depth=0 }
-    }' "$NGINX_VHOST" | sudo tee "$NGINX_VHOST" >/dev/null
+  DOCKER="sudo docker"
 fi
 
-# 5) Test & reload Nginx
-sudo nginx -t
-sudo systemctl reload nginx
-
-# 6) Quick health check
-sleep 2
-if curl -fsS "http://127.0.0.1:8080" >/dev/null; then
-  echo "AppFlowy container is responding on 8080."
+echo "==> Cloning AppFlowy-Cloud"
+as_root "mkdir -p $(dirname "$APP_DIR")"
+as_root "chown $USER:$USER $(dirname "$APP_DIR")"
+if [ ! -d "$APP_DIR/.git" ]; then
+  git clone https://github.com/AppFlowy-IO/AppFlowy-Cloud.git "$APP_DIR"
 else
-  echo "WARNING: AppFlowy did not respond on 8080 yet. Container may still be starting."
+  echo "   Repo already exists, pulling latest..."
+  (cd "$APP_DIR" && git pull --ff-only)
 fi
 
-echo
-echo "✅ AppFlowy installed."
-echo "Open: http://$SERVER_IP/appflowy/"
-echo
-echo "If you later want HTTPS on the whole site, just run certbot for your domain;"
-echo "the /appflowy reverse proxy will be covered automatically by your main vhost."
+echo "==> Generating AppFlowy .env (interactive if script requires it)"
+# Try non-interactive first; fall back to interactive if needed
+set +e
+( cd "$APP_DIR" && ./script/generate_env.sh </dev/null )
+GEN_RC=$?
+set -e
+if [ $GEN_RC -ne 0 ]; then
+  echo "   The generator may be interactive in this version; launching interactively..."
+  ( cd "$APP_DIR" && ./script/generate_env.sh )
+fi
+
+echo "==> Bringing up AppFlowy Cloud stack (first run can take several minutes)"
+# AppFlowy helper handles compose; --reset ensures fresh start
+( cd "$APP_DIR" && ./script/run_local_server.sh --reset )
+
+echo "==> Detecting exposed web port t

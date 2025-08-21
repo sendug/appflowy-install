@@ -5,6 +5,13 @@ SERVER_IP="10.70.5.185"
 
 set -euo pipefail
 
+# Determine the non-root user who launched the script
+RUN_USER="${SUDO_USER:-$USER}"
+
+# Ensure parent dir exists and is owned by the launching user
+sudo mkdir -p "$(dirname "$APP_DIR")"
+sudo chown -R "$RUN_USER:$RUN_USER" "$(dirname "$APP_DIR")"
+
 APP_DIR="/srv/AppFlowy-Cloud"
 NGINX_VHOST="/etc/nginx/conf.d/snipeit.conf"   # adjust if your vhost path differs
 HOST_PORT="18080"                               # host port for appflowy nginx (container's 80 -> host 18080)
@@ -36,19 +43,18 @@ else
 fi
 
 echo "==> Cloning / updating AppFlowy-Cloud"
-as_root "mkdir -p $(dirname "$APP_DIR")"
-as_root "chown $USER:$USER $(dirname "$APP_DIR")"
 if [ ! -d "$APP_DIR/.git" ]; then
-  git clone https://github.com/AppFlowy-IO/AppFlowy-Cloud.git "$APP_DIR"
+  sudo -u "$RUN_USER" git clone https://github.com/AppFlowy-IO/AppFlowy-Cloud.git "$APP_DIR"
 else
   echo "   Repo already exists, pulling latest..."
-  (cd "$APP_DIR" && git pull --ff-only)
+  sudo -u "$RUN_USER" git -C "$APP_DIR" pull --ff-only
 fi
+
 
 echo "==> Ensuring .env exists & setting safe defaults for optional vars"
 cd "$APP_DIR"
 [ -f .env ] || { [ -f .env.example ] && cp .env.example .env || touch .env; }
-# Add optional/no-op defaults to silence compose warnings (only append if missing)
+# Add optional/no-op defaults to silence compose warnings only append if missing)
 for kv in \
   "APPFLOWY_S3_REGION=" \
   "APPFLOWY_S3_PRESIGNED_URL_ENDPOINT=" \

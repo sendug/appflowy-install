@@ -10,9 +10,9 @@ COMPOSE_FILE="$APP_DIR/compose.yml"
 NGINX_VHOST="/etc/nginx/conf.d/snipeit.conf"
 LOCATION_MARK="# >>> APPFLOWY /appflowy REVERSE PROXY >>>"
 
-# 1) Install Docker & Compose v2
+# 1) Install Docker Engine + Compose plugin from official repo
 sudo apt update
-sudo apt install -y docker.io docker-compose-plugin
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 sudo systemctl enable --now docker
 
 # 2) Create AppFlowy directory + compose file

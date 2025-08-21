@@ -35,7 +35,7 @@ services:
 YAML
 
 # 3) Start AppFlowy
-docker compose -f "$COMPOSE_FILE" up -d
+sudo docker compose -f "$COMPOSE_FILE" up -d
 
 # 4) Add Nginx reverse proxy at /appflowy/
 if [ ! -f "$NGINX_VHOST" ]; then
